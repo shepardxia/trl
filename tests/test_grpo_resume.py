@@ -12,12 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM, Trainer
 
-from trl import GRPOTrainer
+from trl import GRPOConfig, GRPOTrainer
 
 
 def bare_trainer(**attributes):
@@ -69,3 +71,43 @@ def test_resume_loads_the_trained_adapter(checkpoint):
     assert model.active_adapters == ["default"]
     trainable = {n for n, p in model.named_parameters() if p.requires_grad}
     assert trainable and all(".default." in n for n in trainable)
+
+
+def learning_rates(args, steps):
+    optimizer = torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=1.0)
+    scheduler = bare_trainer(args=args, optimizer=optimizer, lr_scheduler=None).create_scheduler(steps)
+    rates = []
+    for _ in range(steps + 1):
+        rates.append(scheduler.get_last_lr()[0])
+        optimizer.step()
+        scheduler.step()
+    return rates
+
+
+def test_warmup_starts_at_the_given_rate(tmp_path):
+    args = GRPOConfig(
+        output_dir=str(tmp_path),
+        lr_scheduler_type="cosine_with_min_lr",
+        lr_scheduler_kwargs={"min_lr_rate": 0.2},
+        warmup_steps=10,
+        warmup_start_rate=0.1,
+    )
+    rates = learning_rates(args, steps=50)
+    assert rates[0] == pytest.approx(0.1)
+    assert rates[5] == pytest.approx(0.55)
+    assert rates[10] == pytest.approx(1.0)
+    assert rates[30] == pytest.approx(0.2 + 0.8 * 0.5 * (1.0 + math.cos(math.pi * 0.5)))
+    assert rates[50] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("schedule", ["constant_with_warmup", "linear", "cosine", "cosine_with_min_lr"])
+def test_schedule_after_the_warmup_is_the_stock_one(tmp_path, schedule):
+    kwargs = {"min_lr_rate": 0.2} if schedule == "cosine_with_min_lr" else {}
+    args = GRPOConfig(
+        output_dir=str(tmp_path), lr_scheduler_type=schedule, lr_scheduler_kwargs=kwargs, warmup_steps=10
+    )
+    stock = learning_rates(args, steps=50)
+    args.warmup_start_rate = 0.5
+    ramped = learning_rates(args, steps=50)
+    assert ramped[0] == pytest.approx(0.5)
+    assert ramped[10:] == pytest.approx(stock[10:])

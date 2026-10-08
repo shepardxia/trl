@@ -354,6 +354,9 @@ class GRPOConfig(_BaseConfig):
             including on-policy: the ratio is differentiable, so it affects the gradient even where its value is
             exactly 1. The unbiased reverse-KL property holds for `importance_sampling_level="token"`; with
             `"sequence"` a sequence-level weight is broadcast onto the per-token KL.
+        warmup_start_rate (`float`, *optional*, defaults to `0.0`):
+            Fraction of the learning rate at which the linear warmup starts. With the default `0.0` the scheduler
+            is the one `lr_scheduler_type` names.
 
         > Parameters that control the logging
 
@@ -973,6 +976,13 @@ class GRPOConfig(_BaseConfig):
             "including on-policy: the ratio is differentiable, so it affects the gradient even where its value is "
             "exactly 1. The unbiased reverse-KL property holds for `importance_sampling_level='token'`; with "
             "'sequence' a sequence-level weight is broadcast onto the per-token KL."
+        },
+    )
+    warmup_start_rate: float = field(
+        default=0.0,
+        metadata={
+            "help": "Fraction of the learning rate at which the linear warmup starts. With the default `0.0` the "
+            "scheduler is the one `lr_scheduler_type` names."
         },
     )
 
