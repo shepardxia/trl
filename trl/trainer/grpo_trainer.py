@@ -3486,6 +3486,17 @@ class GRPOTrainer(_BaseTrainer):
             with open(os.path.join(output_dir, "entropy_ctrl_state.json"), "w") as f:
                 json.dump({"entropy_coef": self.entropy_coef, "last_world_entropy": self._last_world_entropy}, f)
 
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
+        super()._load_from_checkpoint(resume_from_checkpoint, model)
+        # PEFT saves the "default" adapter at the top level of a checkpoint and every other one in a subdirectory.
+        # Once a subdirectory exists (the "ref" adapter), the parent loads the subdirectories only, which leaves
+        # the trained adapter at its initial weights.
+        model = self.model if model is None else model
+        if is_peft_model(model) and "ref" in model.peft_config:
+            active_adapter = model.active_adapters[0]
+            model.load_adapter(resume_from_checkpoint, active_adapter, is_trainable=True)
+            model.set_adapter(active_adapter)
+
     def _load_optimizer_and_scheduler(self, checkpoint):
         super()._load_optimizer_and_scheduler(checkpoint)
         if self.use_adaptive_entropy and checkpoint is not None:
