@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 
 from transformers import Trainer
-from transformers.integrations import is_mlflow_available, is_trackio_available, is_wandb_available
+from transformers.integrations import is_mlflow_available, is_trackio_available
 
 
 if is_mlflow_available():
@@ -28,15 +28,11 @@ if is_trackio_available():
     import trackio
 
 
-if is_wandb_available():
-    import wandb
-
-
 class ProfilingContext:
     """
     Context manager for profiling code blocks with configurable logging.
 
-    This class handles timing of code execution and logging metrics to various backends (Weights & Biases, MLflow,
+    This class handles timing of code execution and logging metrics to various backends (MLflow,
     Trackio) without being coupled to the Trainer class.
 
     Args:
@@ -118,9 +114,8 @@ class ProfilingContext:
         metric_name = f"{self.metric_prefix}: {self.name}"
         metrics = {metric_name: duration}
 
-        # Log to Weights & Biases if configured
-        if "wandb" in self.report_to and is_wandb_available() and wandb.run is not None:
-            wandb.log(metrics)
+        # Nothing goes to Weights & Biases: a `wandb.log` with no step opens a history row holding this one key,
+        # so every timed call would add a row beside the one that carries the training metrics.
 
         # Log to MLflow if configured
         if "mlflow" in self.report_to and is_mlflow_available() and mlflow.active_run() is not None:
