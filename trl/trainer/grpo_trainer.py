@@ -75,6 +75,7 @@ from ..models import prepare_deepspeed, prepare_fsdp, unwrap_model_for_generatio
 from ..models.utils import _ForwardRedirection, disable_gradient_checkpointing
 from .base_trainer import _BaseTrainer
 from .callbacks import SyncRefModelCallback
+from . import prefix_pack
 from .grpo_config import GRPOConfig
 from .utils import (
     RepeatSampler,
@@ -784,6 +785,13 @@ class GRPOTrainer(_BaseTrainer):
         self.vllm_importance_sampling_clip_max = args.vllm_importance_sampling_clip_max
         self.vllm_importance_sampling_clip_min = args.vllm_importance_sampling_clip_min
         self.use_liger_kernel = args.use_liger_kernel
+        self.prefix_pack = args.prefix_pack
+        if self.prefix_pack and args.num_generations % args.per_device_train_batch_size != 0:
+            logger.warning(
+                f"`prefix_pack` is disabled: `per_device_train_batch_size` ({args.per_device_train_batch_size}) "
+                f"does not divide `num_generations` ({args.num_generations}), so a microbatch spans prompts."
+            )
+            self.prefix_pack = False
         self.loss_type = args.loss_type
         self.multi_objective_aggregation = args.multi_objective_aggregation
 
@@ -1363,6 +1371,29 @@ class GRPOTrainer(_BaseTrainer):
         image_sizes=None,
         image_position_ids=None,
     ):
+        if self.prefix_pack:
+            multimodal = (
+                pixel_values,
+                image_grid_thw,
+                pixel_attention_mask,
+                spatial_shapes,
+                image_sizes,
+                image_position_ids,
+            )
+            prompt_length = input_ids.size(1) - logits_to_keep
+            prompt_ids, prompt_mask = input_ids[:, :prompt_length], attention_mask[:, :prompt_length]
+            if all(v is None for v in multimodal) and prefix_pack.shares_one_prompt(prompt_ids, prompt_mask):
+                last_hidden_state, _, _ = prefix_pack.packed_hidden(
+                    unwrapped_model,
+                    prompt_ids,
+                    prompt_mask,
+                    input_ids[:, prompt_length:],
+                    attention_mask[:, prompt_length:],
+                    logits_to_keep,
+                )
+                return last_hidden_state
+            prefix_pack.restore_attention(unwrapped_model)
+
         if is_peft_model(unwrapped_model):
             unwrapped_model = unwrapped_model.base_model.model
 
@@ -1471,6 +1502,66 @@ class GRPOTrainer(_BaseTrainer):
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Compute log-probs, (optionally) entropies, and (optionally) the MoE load-balancing aux loss."""
         batch_size = batch_size or input_ids.size(0)  # Chunk inputs into smaller batches to reduce memory peak
+        multimodal = (
+            pixel_values,
+            image_grid_thw,
+            num_images,
+            pixel_attention_mask,
+            spatial_shapes,
+            num_tiles,
+            image_sizes,
+            token_type_ids,
+            mm_token_type_ids,
+            image_position_ids,
+        )
+        if all(v is None for v in multimodal) and not compute_aux_loss:
+            if not torch.is_grad_enabled():
+                # The no-grad reference and old-policy passes go through the same chunked head and vocab chunk
+                # as the fused loss, so their log-probs match the policy's bit for bit; the full-logits path below
+                # divides by the temperature in the model dtype and does not.
+                if self.use_liger_kernel and not compute_entropy:
+                    unwrapped_model = self.accelerator.unwrap_model(model)
+                    base_model = unwrapped_model.base_model.model if is_peft_model(unwrapped_model) else unwrapped_model
+                    all_logps = []
+                    for start in range(0, input_ids.size(0), batch_size):
+                        input_ids_batch = input_ids[start : start + batch_size]
+                        attention_mask_batch = attention_mask[start : start + batch_size]
+                        last_hidden_state = self._get_last_hidden_state(
+                            unwrapped_model, input_ids_batch, attention_mask_batch, logits_to_keep
+                        )
+                        logps, _ = prefix_pack.chunked_head(
+                            base_model.lm_head,
+                            base_model.config,
+                            last_hidden_state,
+                            input_ids_batch[:, -logits_to_keep:],
+                            attention_mask_batch[:, -logits_to_keep:],
+                            self.temperature,
+                        )
+                        all_logps.append(logps)
+                    return torch.cat(all_logps, dim=0), None, None
+            elif self.prefix_pack:
+                prompt_length = input_ids.size(1) - logits_to_keep
+                prompt_ids, prompt_mask = input_ids[:, :prompt_length], attention_mask[:, :prompt_length]
+                if prefix_pack.shares_one_prompt(prompt_ids, prompt_mask):
+                    last_hidden_state, completion_mask, completion_ids = prefix_pack.packed_hidden(
+                        model,
+                        prompt_ids,
+                        prompt_mask,
+                        input_ids[:, prompt_length:],
+                        attention_mask[:, prompt_length:],
+                        logits_to_keep,
+                    )
+                    logps, entropies = prefix_pack.chunked_head(
+                        prefix_pack.lm_head(model),
+                        prefix_pack.decoder(model).config,
+                        last_hidden_state,
+                        completion_ids,
+                        completion_mask,
+                        self.temperature,
+                    )
+                    return logps, (entropies if compute_entropy else None), None
+        if self.prefix_pack:
+            prefix_pack.restore_attention(model)
         all_logps = []
         all_entropies = []
         all_aux_losses = []
@@ -1597,7 +1688,10 @@ class GRPOTrainer(_BaseTrainer):
                 # self._buffered_inputs=None can occur when resuming from a checkpoint
                 generation_batch = self._generate_and_score_completions(generation_batch)
                 generation_batch = split_pixel_values_by_grid(generation_batch)
-                generation_batch = shuffle_sequence_dict(generation_batch)
+                # A packed microbatch must hold one prompt's completions, which the generation batch already
+                # lays out contiguously.
+                if not self.prefix_pack:
+                    generation_batch = shuffle_sequence_dict(generation_batch)
                 generation_batches = split_tensor_dict(generation_batch, self.args.steps_per_generation)
                 self._buffered_inputs = [unsplit_pixel_values_by_grid(batch) for batch in generation_batches]
             inputs = self._buffered_inputs[self._step % self.args.steps_per_generation]
@@ -1820,6 +1914,9 @@ class GRPOTrainer(_BaseTrainer):
     def _generate_single_turn(self, prompt_ids, images, multimodal_fields, has_tool_images=False):
         device = self.accelerator.device
         mode = "train" if self.model.training else "eval"
+
+        if self.prefix_pack and not self.use_vllm:
+            prefix_pack.restore_attention(self.model)  # generation below runs the training model itself
 
         # Generate completions using either vLLM or regular generation
         if self.use_vllm:

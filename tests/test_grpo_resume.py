@@ -111,3 +111,63 @@ def test_schedule_after_the_warmup_is_the_stock_one(tmp_path, schedule):
     ramped = learning_rates(args, steps=50)
     assert ramped[0] == pytest.approx(0.5)
     assert ramped[10:] == pytest.approx(stock[10:])
+
+
+def test_training_resumes_a_warm_started_adapter(tmp_path, monkeypatch):
+    """Two packed steps of two microbatches on a pretrained adapter with a KL term, then a resume from the
+    last checkpoint."""
+    from datasets import load_dataset
+    from transformers import AutoModelForCausalLM
+
+    from trl.trainer import prefix_pack
+
+    from .test_prefix_pack import dense_varlen
+
+    monkeypatch.setattr(prefix_pack, "_varlen", dense_varlen)
+    monkeypatch.setattr(prefix_pack, "_stock_attn", None)
+    packed_hidden, packed_calls = prefix_pack.packed_hidden, []
+    monkeypatch.setattr(
+        prefix_pack, "packed_hidden", lambda *args: packed_calls.append(None) or packed_hidden(*args)
+    )
+    dataset = load_dataset("trl-internal-testing/zen", "standard_prompt_only", split="train")
+
+    def trainer():
+        torch.manual_seed(0)
+        model = AutoModelForCausalLM.from_pretrained("trl-internal-testing/tiny-Qwen2ForCausalLM-2.5", dtype="float32")
+        lora = LoraConfig(target_modules=["q_proj", "v_proj"], init_lora_weights=False, task_type="CAUSAL_LM")
+        args = GRPOConfig(
+            output_dir=str(tmp_path),
+            learning_rate=0.1,
+            per_device_train_batch_size=3,
+            num_generations=3,
+            gradient_accumulation_steps=2,
+            max_completion_length=8,
+            beta=0.1,
+            prefix_pack=True,
+            warmup_steps=1,
+            warmup_start_rate=0.5,
+            max_steps=2,
+            save_steps=1,
+            report_to="none",
+        )
+        return GRPOTrainer(
+            model=get_peft_model(model, lora),
+            reward_funcs=lambda completions, **kwargs: [float(len(c)) for c in completions],
+            args=args,
+            train_dataset=dataset,
+        )
+
+    first = trainer()
+    initial = adapter_weights(first.model, "default")
+    first.train()
+    assert first.prefix_pack and "ref" in first.model.peft_config
+    assert len(packed_calls) == 4  # every microbatch holds one prompt, since the generation batch is not shuffled
+    trained = adapter_weights(first.model, "default")
+    assert any(not torch.equal(w, initial[n]) for n, w in trained.items())
+    for name, weight in adapter_weights(first.model, "ref").items():
+        torch.testing.assert_close(weight, initial[name.replace(".ref.", ".default.")])
+
+    resumed = trainer()
+    resumed.train(resume_from_checkpoint=str(tmp_path / "checkpoint-2"))
+    for name, weight in adapter_weights(resumed.model, "default").items():
+        torch.testing.assert_close(weight, trained[name])
