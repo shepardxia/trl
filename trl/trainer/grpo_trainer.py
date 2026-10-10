@@ -2429,6 +2429,18 @@ class GRPOTrainer(_BaseTrainer):
         self._metrics[mode]["completions/min_terminated_length"].append(term_completion_lengths.float().min().item())
         self._metrics[mode]["completions/max_terminated_length"].append(term_completion_lengths.float().max().item())
 
+        # Mean surprisal of the sampled tokens. Under untruncated temperature-1 sampling its expectation is the
+        # policy's per-token entropy.
+        if logprobs is not None:
+            masks = tool_mask if tool_mask is not None else [[1] * len(seq) for seq in logprobs]
+            kept = [
+                [lp for lp, m in zip(seq, mask, strict=True) if m and lp is not None]
+                for seq, mask in zip(logprobs, masks, strict=True)
+            ]
+            stats = torch.tensor([[-sum(seq), len(seq)] for seq in kept], dtype=torch.float32, device=device)
+            agg_stats = self.accelerator.gather(stats).sum(dim=0)
+            self._metrics[mode]["sampling/surprisal"].append((agg_stats[0] / agg_stats[1]).item())
+
         if self.tools:
             agg_tool_call_count = self.accelerator.gather(torch.tensor(tool_call_count, device=device)).sum()
             tool_call_frequency = (agg_tool_call_count / len(agg_prompt_lengths)).item()
