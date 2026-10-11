@@ -54,7 +54,7 @@ from transformers import (
     is_trackio_available,
     is_wandb_available,
 )
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, SchedulerType
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import is_peft_available, is_rich_available
 
 from ..chat_template_utils import (
@@ -3605,38 +3605,6 @@ class GRPOTrainer(_BaseTrainer):
             active_adapter = model.active_adapters[0]
             model.load_adapter(resume_from_checkpoint, active_adapter, is_trainable=True)
             model.set_adapter(active_adapter)
-
-    def create_scheduler(self, num_training_steps, optimizer=None):
-        if self.lr_scheduler is not None or self.args.warmup_start_rate == 0.0:
-            return super().create_scheduler(num_training_steps, optimizer)
-        # Linear warmup from `warmup_start_rate` instead of from zero, then the shape `lr_scheduler_type` names.
-        warmup_steps = self.args.get_warmup_steps(num_training_steps)
-        start_rate = self.args.warmup_start_rate
-        schedule = SchedulerType(self.args.lr_scheduler_type)
-        min_lr_rate = 0.0
-        if schedule == SchedulerType.COSINE_WITH_MIN_LR:
-            min_lr_rate = (self.args.lr_scheduler_kwargs or {}).get("min_lr_rate", 0.0)
-        elif schedule not in (
-            SchedulerType.CONSTANT,
-            SchedulerType.CONSTANT_WITH_WARMUP,
-            SchedulerType.LINEAR,
-            SchedulerType.COSINE,
-        ):
-            raise ValueError(f"`warmup_start_rate` does not support `lr_scheduler_type={schedule.value!r}`.")
-
-        def lr_lambda(step):
-            if step < warmup_steps:
-                return start_rate + (1.0 - start_rate) * step / warmup_steps
-            if schedule in (SchedulerType.CONSTANT, SchedulerType.CONSTANT_WITH_WARMUP):
-                return 1.0
-            progress = min(1.0, max(0.0, (step - warmup_steps) / max(1, num_training_steps - warmup_steps)))
-            if schedule == SchedulerType.LINEAR:
-                return 1.0 - progress
-            return min_lr_rate + (1.0 - min_lr_rate) * 0.5 * (1.0 + math.cos(math.pi * progress))
-
-        self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer or self.optimizer, lr_lambda)
-        self._created_lr_scheduler = True
-        return self.lr_scheduler
 
     def _load_optimizer_and_scheduler(self, checkpoint):
         super()._load_optimizer_and_scheduler(checkpoint)

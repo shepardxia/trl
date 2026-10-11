@@ -360,9 +360,6 @@ class GRPOConfig(_BaseConfig):
             `per_device_train_batch_size` to divide `num_generations`, and skips the generation-batch shuffle, which
             cannot change the gradient while `steps_per_generation == gradient_accumulation_steps` and
             `num_iterations == 1`.
-        warmup_start_rate (`float`, *optional*, defaults to `0.0`):
-            Fraction of the learning rate at which the linear warmup starts. With the default `0.0` the scheduler
-            is the one `lr_scheduler_type` names.
 
         > Parameters that control the logging
 
@@ -992,13 +989,6 @@ class GRPOConfig(_BaseConfig):
             "`per_device_train_batch_size` to divide `num_generations`, and skips the generation-batch shuffle, "
             "which cannot change the gradient while `steps_per_generation == gradient_accumulation_steps` and "
             "`num_iterations == 1`."
-        },
-    )
-    warmup_start_rate: float = field(
-        default=0.0,
-        metadata={
-            "help": "Fraction of the learning rate at which the linear warmup starts. With the default `0.0` the "
-            "scheduler is the one `lr_scheduler_type` names."
         },
     )
 
