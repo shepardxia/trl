@@ -178,6 +178,9 @@ class VLLMGeneration:
             - "vllm" will use the vLLM model implementation.
             - "transformers" will use the Transformers model implementation.
             - "terratorch" will use the TerraTorch model implementation.
+        reasoning_parser (`str`, *optional*, defaults to `""`):
+            Name of the vLLM reasoning parser that marks the reasoning block (e.g. `"qwen3"`), required by
+            `max_thinking_length`. Empty disables it.
         trust_remote_code (`bool`, *optional*, defaults to `False`):
             Trust remote code (e.g., from HuggingFace) when downloading the model and tokenizer.
 
@@ -201,6 +204,10 @@ class VLLMGeneration:
             the probability of the most likely token. Default `0.0` means min-p is disabled.
         max_completion_length (`int`, *optional*, defaults to `16`):
             Maximum number of tokens to generate for each prompt.
+        max_thinking_length (`int`, *optional*):
+            Maximum number of tokens inside the reasoning block. Once reached, vLLM forces the parser's
+            end-of-reasoning string and generation continues up to `max_completion_length`. Colocate mode only;
+            requires `reasoning_parser`.
         logprobs (`int` or `None`, *optional*, defaults to `0`):
             Number of top logprobs to return per token. When 0 (default), only the sampled token's logprob is returned
             (inner dimension = 1). When N>0, returns up to N+1 logprobs sorted by descending probability, because vLLM
@@ -234,6 +241,7 @@ class VLLMGeneration:
         max_num_seqs: int | None = None,
         enable_sleep_mode: bool = False,
         model_impl: str = "auto",
+        reasoning_parser: str = "",
         trust_remote_code: bool = False,
         # Generation configuration
         repetition_penalty: float = 1.0,
@@ -242,6 +250,7 @@ class VLLMGeneration:
         top_k: int = 0,
         min_p: float = 0.0,
         max_completion_length: int = 16,
+        max_thinking_length: int | None = None,
         logprobs: int | None = 0,
         generation_kwargs: dict | None = None,
     ):
@@ -268,6 +277,7 @@ class VLLMGeneration:
         self.max_num_seqs = max_num_seqs
         self.enable_sleep_mode = enable_sleep_mode
         self.model_impl = model_impl
+        self.reasoning_parser = reasoning_parser
         self.trust_remote_code = trust_remote_code
 
         # Generation configuration
@@ -277,6 +287,7 @@ class VLLMGeneration:
         self.top_k = top_k
         self.min_p = min_p
         self.max_completion_length = max_completion_length
+        self.max_thinking_length = max_thinking_length
         self.logprobs = logprobs
         self.generation_kwargs = generation_kwargs or {}
 
@@ -352,6 +363,7 @@ class VLLMGeneration:
                 max_num_seqs=self.max_num_seqs,
                 enable_sleep_mode=self.enable_sleep_mode,
                 model_impl=self.model_impl,
+                reasoning_parser=self.reasoning_parser,
                 distributed_executor_backend="external_launcher",
                 # Feed identical seed for tp groups to ensure sampling results are the same across workers
                 seed=accelerator.process_index // self.tensor_parallel_size,
@@ -667,6 +679,7 @@ class VLLMGeneration:
                 "top_k": top_k,
                 "min_p": 0.0 if min_p is None else min_p,
                 "max_tokens": max_completion_length,
+                "thinking_token_budget": self.max_thinking_length,
                 "logprobs": self.logprobs,
             }
             generation_kwargs.update(self.generation_kwargs)
