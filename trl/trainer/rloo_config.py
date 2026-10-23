@@ -64,10 +64,6 @@ class RLOOConfig(_BaseConfig):
             save computation. If `None`, uses the value of `num_generations`.
         max_completion_length (`int` or `None`, *optional*, defaults to `512`):
             Maximum length of the generated completion.
-        max_thinking_length (`int`, *optional*):
-            Maximum number of tokens inside the reasoning block, counted within `max_completion_length`. Once reached,
-            vLLM closes the block and generation continues up to `max_completion_length`. Requires colocated vLLM and
-            `vllm_reasoning_parser`.
         ds3_gather_for_generation (`bool`, *optional*, defaults to `True`):
             This setting applies to DeepSpeed ZeRO-3. If enabled, the policy model weights are gathered for generation,
             improving generation speed. However, disabling this option allows training models that exceed the VRAM
@@ -164,10 +160,6 @@ class RLOOConfig(_BaseConfig):
             Control the tensor parallel size for vLLM. This setting only applies when `vllm_mode` is set to
             `"colocate"`. If you are using `vllm_mode="server"`, this parameter must be passed separately when
             launching the vLLM server via the `--vllm_tensor_parallel_size` flag.
-        vllm_reasoning_parser (`str`, *optional*, defaults to `""`):
-            Name of the vLLM reasoning parser that marks the reasoning block (e.g. `"qwen3"`), required by
-            `max_thinking_length`. Empty disables it. This setting only applies when `vllm_mode` is set to
-            `"colocate"`.
 
         > Parameters that control the training
 
@@ -322,14 +314,6 @@ class RLOOConfig(_BaseConfig):
     max_completion_length: int | None = field(
         default=512,
         metadata={"help": "Maximum length of the generated completion."},
-    )
-    max_thinking_length: int | None = field(
-        default=None,
-        metadata={
-            "help": "Maximum number of tokens inside the reasoning block, counted within `max_completion_length`. "
-            "Once reached, vLLM closes the block and generation continues up to `max_completion_length`. Requires "
-            "colocated vLLM and `vllm_reasoning_parser`."
-        },
     )
     ds3_gather_for_generation: bool = field(
         default=True,
@@ -508,14 +492,6 @@ class RLOOConfig(_BaseConfig):
             "launching the vLLM server via the `--vllm_tensor_parallel_size` flag."
         },
     )
-    vllm_reasoning_parser: str = field(
-        default="",
-        metadata={
-            "help": "Name of the vLLM reasoning parser that marks the reasoning block (e.g. `'qwen3'`), required by "
-            "`max_thinking_length`. Empty disables it. This setting only applies when `vllm_mode` is set to "
-            "`'colocate'`."
-        },
-    )
 
     # Parameters that control the training
     beta: float = field(
@@ -666,19 +642,6 @@ class RLOOConfig(_BaseConfig):
                 "prompt groups of num_generations completions, and reducing the batch size on out-of-memory breaks "
                 "this invariant. Set auto_find_batch_size=False and lower per_device_train_batch_size instead."
             )
-
-        if self.max_thinking_length is not None:
-            if not self.use_vllm or self.vllm_mode != "colocate":
-                raise ValueError("max_thinking_length requires colocated vLLM (use_vllm=True, vllm_mode='colocate').")
-            if not self.vllm_reasoning_parser:
-                raise ValueError(
-                    "max_thinking_length requires vllm_reasoning_parser, the parser that marks the reasoning block."
-                )
-            if self.max_completion_length is not None and self.max_thinking_length >= self.max_completion_length:
-                raise ValueError(
-                    f"max_thinking_length ({self.max_thinking_length}) must be below max_completion_length "
-                    f"({self.max_completion_length}), which bounds the whole completion."
-                )
 
         num_processes = self.world_size
         # The current default effective batch size

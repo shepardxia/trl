@@ -681,7 +681,6 @@ class RLOOTrainer(_BaseTrainer):
                 * args.steps_per_generation,
                 enable_sleep_mode=args.vllm_enable_sleep_mode,
                 model_impl=args.vllm_model_impl,
-                reasoning_parser=args.vllm_reasoning_parser,
                 trust_remote_code=args.trust_remote_code,
                 # Generation configuration
                 repetition_penalty=self.repetition_penalty,
@@ -690,7 +689,6 @@ class RLOOTrainer(_BaseTrainer):
                 top_k=self.top_k,
                 min_p=self.min_p,
                 max_completion_length=self.max_completion_length,
-                max_thinking_length=args.max_thinking_length,
                 logprobs=None,  # we don't need logprobs from vLLM in RLOO
                 generation_kwargs=args.generation_kwargs,
             )
