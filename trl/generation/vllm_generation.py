@@ -17,7 +17,7 @@
 import logging
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 import torch
@@ -267,6 +267,7 @@ class VLLMGeneration:
         self.max_model_length = max_model_length
         self.max_num_seqs = max_num_seqs
         self.enable_sleep_mode = enable_sleep_mode
+        self._defer_sleep = False
         self.model_impl = model_impl
         self.trust_remote_code = trust_remote_code
 
@@ -547,6 +548,19 @@ class VLLMGeneration:
             )
         return {**features, "mm_placeholders": {**features["mm_placeholders"], "image": placeholders}}
 
+    @contextmanager
+    def generation_session(self):
+        """Keep weights and prefix cache alive across a multi-turn rollout, then release them for training."""
+        previous = self._defer_sleep
+        self._defer_sleep = True
+        try:
+            yield
+        finally:
+            self._defer_sleep = previous
+            if self.mode == "colocate" and self.enable_sleep_mode and not previous:
+                self.llm.sleep(level=2)
+                self._llm_weights_sleeping = True
+
     def generate(
         self,
         prompts: list[list[int]],
@@ -747,7 +761,7 @@ class VLLMGeneration:
                 logprobs = all_logprobs
                 logprob_token_ids = all_logprob_token_ids
 
-            if self.enable_sleep_mode:
+            if self.enable_sleep_mode and not self._defer_sleep:
                 self.llm.sleep(level=2)
                 self._llm_weights_sleeping = True
 

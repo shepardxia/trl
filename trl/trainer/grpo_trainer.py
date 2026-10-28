@@ -1072,6 +1072,7 @@ class GRPOTrainer(_BaseTrainer):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._total_train_tokens = 0
         self._current_train_step_time = 0.0
+        self._current_train_compute_time = 0.0
         self.log_completions = args.log_completions
         self.log_multimodal = args.log_multimodal
         self.log_unique_prompts = args.log_unique_prompts
@@ -1660,17 +1661,25 @@ class GRPOTrainer(_BaseTrainer):
 
     def training_step(self, model, inputs, num_items_in_batch):
         time_before = time.perf_counter()
+        self._prepare_inputs_duration = 0.0
         output = super().training_step(model, inputs, num_items_in_batch)
         self._step += 1
         time_after = time.perf_counter()
         self._current_train_step_time += time_after - time_before
+        self._current_train_compute_time += time_after - time_before - self._prepare_inputs_duration
         if self._step % self.current_gradient_accumulation_steps == 0:
             self._metrics["train"]["step_time"].append(self._current_train_step_time)
+            self._metrics["train"]["timing/train_compute_seconds"].append(self._current_train_compute_time)
+            self._metrics["train"]["timing/prepare_seconds"].append(
+                self._current_train_step_time - self._current_train_compute_time
+            )
             self._current_train_step_time = 0.0
+            self._current_train_compute_time = 0.0
         return output
 
     @profiling_decorator
     def _prepare_inputs(self, generation_batch: dict[str, torch.Tensor | Any]) -> dict[str, torch.Tensor | Any]:
+        started = time.perf_counter()
         # Prepares inputs for model training/evaluation by managing completion generation and batch handling.
         # During training:
         #   - Receives the local generation batch (Per-GPU batch size × steps per generation)
@@ -1702,6 +1711,7 @@ class GRPOTrainer(_BaseTrainer):
             # In evaluation, there is neither batch grouping for generation, nor multiple iterations, hence
             # local generation batch == local eval batch
             inputs = self._generate_and_score_completions(generation_batch)
+        self._prepare_inputs_duration = time.perf_counter() - started
         return inputs
 
     def _log_completion_extra(self, column: str, values: list):

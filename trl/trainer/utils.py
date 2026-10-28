@@ -1420,8 +1420,13 @@ class _ChunkedLogProbFunction(torch.autograd.Function):
 
             # NOTE(@aminediro): always acc in fp32 even if input is not
             grad_hidden = torch.zeros(hidden.shape, device=hidden.device, dtype=torch.float32)
-            grad_weight = torch.zeros(weight.shape, device=weight.device, dtype=torch.float32)
-            grad_bias = torch.zeros(bias.shape, device=bias.device, dtype=torch.float32) if bias is not None else None
+            # LoRA leaves the output head frozen: only its input needs a gradient.
+            grad_weight = (
+                torch.zeros(weight.shape, device=weight.device, dtype=torch.float32) if ctx.needs_input_grad[1] else None
+            )
+            grad_bias = (
+                torch.zeros(bias.shape, device=bias.device, dtype=torch.float32) if ctx.needs_input_grad[2] else None
+            )
 
             # Pre-allocate reusable buffers to avoid per-chunk allocation
             mm_buf = torch.empty((N, chunk_size), device=hidden.device, dtype=hidden.dtype)
@@ -1473,13 +1478,14 @@ class _ChunkedLogProbFunction(torch.autograd.Function):
                 grad_logits = grad_logits * logit_scale
 
                 grad_hidden.add_(grad_logits @ w_chunk.float())
-                grad_weight[start:end].add_(grad_logits.t() @ hidden.float())
+                if grad_weight is not None:
+                    grad_weight[start:end].add_(grad_logits.t() @ hidden.float())
                 if grad_bias is not None:
                     grad_bias[start:end].add_(grad_logits.sum(dim=0))
 
         return (
             grad_hidden.to(hidden.dtype),
-            grad_weight.to(weight.dtype),
+            grad_weight.to(weight.dtype) if grad_weight is not None else None,
             grad_bias.to(bias.dtype) if grad_bias is not None else None,
             None,
             None,
