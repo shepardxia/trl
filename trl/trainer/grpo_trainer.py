@@ -1039,16 +1039,16 @@ class GRPOTrainer(_BaseTrainer):
             if self.ref_model is not None:
                 _cast_lm_head_to_fp32(self.ref_model)
 
+        # Both paths call the decoder directly, so route their losses through the distributed wrapper.
+        if self.use_liger_kernel or self.prefix_pack:
+            self._forward_redirection = _ForwardRedirection()
+
         # Liger loss
         if self.use_liger_kernel:
             if not is_liger_kernel_available():
                 raise ImportError(
                     "Liger is required to use `use_liger_kernel` as the GRPO loss. Run `pip install liger-kernel`."
                 )
-            # Redirect the model.module forward to the model forward to ensure pre-forward hooks are called, so that
-            # under ZeRO-3 the parameter coordinator gathers/reduces `lm_head.weight` around the fused loss.
-            self._forward_redirection = _ForwardRedirection()
-
             self.liger_loss = FusedLinearGRPOLoss(
                 beta=self.beta,
                 epsilon_low=self.epsilon_low,
@@ -1519,7 +1519,7 @@ class GRPOTrainer(_BaseTrainer):
                 # The no-grad reference and old-policy passes go through the same chunked head and vocab chunk
                 # as the fused loss, so their log-probs match the policy's bit for bit; the full-logits path below
                 # divides by the temperature in the model dtype and does not.
-                if self.use_liger_kernel and not compute_entropy:
+                if (self.use_liger_kernel or self.prefix_pack) and not compute_entropy:
                     unwrapped_model = self.accelerator.unwrap_model(model)
                     base_model = unwrapped_model.base_model.model if is_peft_model(unwrapped_model) else unwrapped_model
                     all_logps = []
@@ -1542,7 +1542,10 @@ class GRPOTrainer(_BaseTrainer):
             elif self.prefix_pack:
                 prompt_length = input_ids.size(1) - logits_to_keep
                 prompt_ids, prompt_mask = input_ids[:, :prompt_length], attention_mask[:, :prompt_length]
-                if prefix_pack.shares_one_prompt(prompt_ids, prompt_mask):
+                packed = prefix_pack.shares_one_prompt(prompt_ids, prompt_mask)
+                mode = "train" if self.model.training else "eval"
+                self._metrics[mode]["prefix_pack/packed_microbatch_fraction"].append(float(packed))
+                if packed:
                     last_hidden_state, completion_mask, completion_ids = prefix_pack.packed_hidden(
                         model,
                         prompt_ids,
@@ -3141,6 +3144,9 @@ class GRPOTrainer(_BaseTrainer):
             # Compute the loss using the liger grpo loss
             unwrapped_model = self.accelerator.unwrap_model(model)
             return self._forward_redirection(model, unwrapped_model, self.compute_liger_loss, unwrapped_model, inputs)
+        if self.prefix_pack:
+            unwrapped_model = self.accelerator.unwrap_model(model)
+            return self._forward_redirection(model, unwrapped_model, self._compute_loss, unwrapped_model, inputs)
         return self._compute_loss(model, inputs)
 
     @staticmethod
